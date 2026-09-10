@@ -8967,6 +8967,16 @@
       function sameScopes(left, right) {
         return JSON.stringify([...left].sort()) === JSON.stringify([...right].sort());
       }
+
+      function sameQuotaWindowSchedule(left, right) {
+        return (
+          left.id === right.id &&
+          left.period_seconds === right.period_seconds &&
+          quotaCycleMode(left.cycle_mode) === quotaCycleMode(right.cycle_mode) &&
+          String(left.anchor_at || "") === String(right.anchor_at || "")
+        );
+      }
+
       function planFromForm() {
         let firstInvalid = null;
         const names = new Set(),
@@ -9441,9 +9451,7 @@
           const existing = editor.initial.plan;
           const affected = (existing?.windows || []).filter(
             (old) =>
-              !plan.windows.some(
-                (quotaWindow) => quotaWindow.id === old.id && quotaWindow.period_seconds === old.period_seconds,
-              ),
+              !plan.windows.some((quotaWindow) => sameQuotaWindowSchedule(old, quotaWindow)),
           );
           if (
             affected.length &&
