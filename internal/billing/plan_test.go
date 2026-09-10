@@ -3,6 +3,7 @@ package billing
 import (
 	"math"
 	"testing"
+	"time"
 )
 
 func TestQuotaWindowsValidationAndIdentity(t *testing.T) {
@@ -22,6 +23,7 @@ func TestQuotaWindowsValidationAndIdentity(t *testing.T) {
 	if _, err := prepareWindows(windows, nil); err == nil {
 		t.Fatal("unknown IDs accepted")
 	}
+	anchor := time.Date(2026, 9, 14, 0, 0, 0, 0, time.FixedZone("CST", 8*60*60))
 	for _, change := range []func(*Plan){
 		func(p *Plan) { p.Windows = nil },
 		func(p *Plan) { p.Windows[0].Name = " long " },
@@ -37,12 +39,21 @@ func TestQuotaWindowsValidationAndIdentity(t *testing.T) {
 		func(p *Plan) { p.Windows[0].RequestLimit = maxQuotaCount + 1 },
 		func(p *Plan) { p.Windows[0].TokenLimit = -1 },
 		func(p *Plan) { p.Windows[0].TokenLimit = maxQuotaCount + 1 },
+		func(p *Plan) { p.Windows[0].CycleMode = QuotaCycleAnchored },
+		func(p *Plan) { p.Windows[0].AnchorAt = anchor },
+		func(p *Plan) { p.Windows[0].CycleMode = "unsupported" },
 	} {
 		invalid := clonePlan(valid)
 		change(&invalid)
 		if invalid.Validate() == nil {
 			t.Fatalf("invalid plan accepted: %+v", invalid)
 		}
+	}
+	anchored := clonePlan(valid)
+	anchored.Windows[0].CycleMode = QuotaCycleAnchored
+	anchored.Windows[0].AnchorAt = anchor
+	if err := anchored.Validate(); err != nil {
+		t.Fatalf("anchored plan rejected: %v", err)
 	}
 }
 

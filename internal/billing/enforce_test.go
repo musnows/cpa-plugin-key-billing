@@ -104,3 +104,70 @@ func TestQuotaWindowsWithDifferentDimensions(t *testing.T) {
 		t.Fatalf("windows did not recover after all exhausted quotas reset: %+v", restored)
 	}
 }
+
+func TestAnchoredQuotaWindowsShareCalendarBoundaries(t *testing.T) {
+	china := time.FixedZone("CST", 8*60*60)
+	anchor := time.Date(2026, 9, 14, 0, 0, 0, 0, china)
+	period := 7 * 24 * time.Hour
+	store := newAccountStore(t, anchor)
+	plan := Plan{ID: "weekly", Windows: []QuotaWindow{{
+		ID: "weekly", Name: "每周额度", AmountUSD: 400, PeriodSeconds: int64(period / time.Second),
+		CycleMode: QuotaCycleAnchored, AnchorAt: anchor,
+	}}}
+	if err := plan.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	store.ReplaceAll(func(state *State) {
+		state.Plans = []Plan{plan}
+		state.Keys["a"] = &KeyState{PlanID: plan.ID}
+		state.Keys["b"] = &KeyState{PlanID: plan.ID}
+	})
+
+	before := store.Authorize("a", anchor.Add(-time.Minute))
+	if before.Allowed || !before.Pending || !before.RetryAt.Equal(anchor) || len(store.state.Keys["a"].Cycles) != 0 {
+		t.Fatalf("before anchor = %+v, cycles = %+v", before, store.state.Keys["a"].Cycles)
+	}
+
+	firstUse := anchor.Add(6 * time.Hour)
+	for _, scope := range []string{"a", "b"} {
+		decision := store.Authorize(scope, firstUse)
+		cycle := store.state.Keys[scope].Cycles["weekly"]
+		if !decision.Allowed || !cycle.StartAt.Equal(anchor) || !cycle.EndAt.Equal(anchor.Add(period)) {
+			t.Fatalf("%s cycle = %+v, decision = %+v", scope, cycle, decision)
+		}
+	}
+
+	store.RecordUsage(subsetEvent("a", firstUse))
+	if store.state.Keys["a"].Cycles["weekly"].SpentUSD == 0 || store.state.Keys["b"].Cycles["weekly"].SpentUSD != 0 {
+		t.Fatalf("key usage was not isolated: a=%+v b=%+v", store.state.Keys["a"].Cycles, store.state.Keys["b"].Cycles)
+	}
+
+	next := store.Authorize("a", anchor.Add(period))
+	cycle := store.state.Keys["a"].Cycles["weekly"]
+	if !next.Allowed || !cycle.StartAt.Equal(anchor.Add(period)) || !cycle.EndAt.Equal(anchor.Add(2*period)) {
+		t.Fatalf("next anchored cycle = %+v, decision = %+v", cycle, next)
+	}
+}
+
+func TestChangingQuotaWindowScheduleResetsBoundCycles(t *testing.T) {
+	china := time.FixedZone("CST", 8*60*60)
+	now := time.Date(2026, 9, 10, 12, 0, 0, 0, china)
+	store := newAccountStore(t, now)
+	plan := Plan{ID: "weekly", Windows: []QuotaWindow{{ID: "weekly", Name: "额度", AmountUSD: 400, PeriodSeconds: 7 * 24 * 3600}}}
+	store.ReplaceAll(func(state *State) {
+		state.Plans = []Plan{plan}
+		state.Keys["key"] = &KeyState{PlanID: plan.ID}
+	})
+	if !store.Authorize("key", now).Allowed {
+		t.Fatal("rolling quota did not allow its first request")
+	}
+	updated := clonePlan(plan)
+	updated.Windows[0].CycleMode = QuotaCycleAnchored
+	updated.Windows[0].AnchorAt = time.Date(2026, 9, 7, 0, 0, 0, 0, china)
+	if _, err := store.UpdatePlanWithBindings(PlanPatch{ID: plan.ID, Windows: &updated.Windows}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(store.state.Keys["key"].Cycles) != 0 {
+		t.Fatalf("schedule change retained a rolling cycle: %+v", store.state.Keys["key"].Cycles)
+	}
+}

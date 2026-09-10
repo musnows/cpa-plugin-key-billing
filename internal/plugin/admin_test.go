@@ -160,6 +160,25 @@ func TestPlansCRUDThroughTheManagementAPI(t *testing.T) {
 	}
 }
 
+func TestAnchoredPlanRoundTripsThroughTheManagementAPI(t *testing.T) {
+	app := newConfiguredApp(t)
+	anchor := time.Date(2026, 9, 14, 0, 0, 0, 0, time.FixedZone("CST", 8*60*60))
+	var created struct {
+		Plan billing.Plan `json:"plan"`
+	}
+	callOK(t, app, http.MethodPost, routePlans, nil, map[string]any{
+		"id": "team-weekly",
+		"windows": []billing.QuotaWindow{{
+			Name: "每周额度", AmountUSD: 400, PeriodSeconds: 7 * 24 * 3600,
+			CycleMode: billing.QuotaCycleAnchored, AnchorAt: anchor,
+		}},
+	}, http.StatusCreated, &created)
+	window := created.Plan.Windows[0]
+	if window.CycleMode != billing.QuotaCycleAnchored || !window.AnchorAt.Equal(anchor) {
+		t.Fatalf("anchored window = %+v", window)
+	}
+}
+
 func TestKeyResetAcceptsScopeList(t *testing.T) {
 	app := newConfiguredApp(t)
 	keys := []string{"sk-reset-first-000001", "sk-reset-second-00002"}

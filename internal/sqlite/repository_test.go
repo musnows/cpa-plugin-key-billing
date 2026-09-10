@@ -84,6 +84,32 @@ func TestRepositoryRoundTrip(t *testing.T) {
 	}
 }
 
+func TestAnchoredQuotaWindowRoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	anchor := time.Date(2026, 9, 14, 0, 0, 0, 0, time.FixedZone("CST", 8*60*60))
+	state := billing.NewState()
+	state.Plans = []billing.Plan{{ID: "weekly", Windows: []billing.QuotaWindow{{
+		ID: "weekly", Name: "每周额度", AmountUSD: 400, PeriodSeconds: 7 * 24 * 3600,
+		CycleMode: billing.QuotaCycleAnchored, AnchorAt: anchor,
+	}}}}
+	state.Keys["scope-a"] = &billing.KeyState{Preview: "sk-tes…0001", PlanID: "weekly", Cycles: map[string]billing.QuotaCycle{
+		"weekly": {PlanID: "weekly", StartAt: anchor, EndAt: anchor.Add(7 * 24 * time.Hour), SpentUSD: 12.5},
+	}}
+
+	database := openDatabase(t, path)
+	mustSave(t, database, state, billing.Changes{AllKeys: true, Plans: true})
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+	loaded := mustLoad(t, openDatabase(t, path)).State
+	window := loaded.Plans[0].Windows[0]
+	cycle := loaded.Keys["scope-a"].Cycles["weekly"]
+	if window.CycleMode != billing.QuotaCycleAnchored || !window.AnchorAt.Equal(anchor) ||
+		!cycle.StartAt.Equal(anchor) || !cycle.EndAt.Equal(anchor.Add(7*24*time.Hour)) || cycle.SpentUSD != 12.5 {
+		t.Fatalf("anchored state = %+v, cycle = %+v", window, cycle)
+	}
+}
+
 func TestSaveWritesOnlyNamedKeys(t *testing.T) {
 	database := openTestDB(t)
 	state := billing.NewState()

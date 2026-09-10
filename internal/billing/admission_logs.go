@@ -29,6 +29,9 @@ func (s *Store) ReportQuotaBlock(scope, endpoint string, decision Decision) {
 		message.WriteString(" → ")
 		message.WriteString(endpoint)
 	}
+	if decision.Pending {
+		fmt.Fprintf(&message, "，订阅计划将在 %s 开始", decision.RetryAt.UTC().Format(time.RFC3339))
+	}
 	for _, window := range decision.Windows {
 		for _, balance := range window.Dimensions {
 			if balance.Blocked {

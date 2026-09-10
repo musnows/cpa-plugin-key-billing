@@ -45,6 +45,8 @@ type QuotaWindowView struct {
 	ID            string         `json:"id"`
 	Name          string         `json:"name"`
 	PeriodSeconds int64          `json:"period_seconds"`
+	CycleMode     QuotaCycleMode `json:"cycle_mode"`
+	AnchorAt      time.Time      `json:"anchor_at,omitzero"`
 	Started       bool           `json:"started"`
 	Blocked       bool           `json:"blocked"`
 	StartAt       time.Time      `json:"start_at,omitzero"`
@@ -54,6 +56,7 @@ type QuotaWindowView struct {
 
 type QuotaView struct {
 	Unlimited bool              `json:"unlimited"`
+	Pending   bool              `json:"pending"`
 	Blocked   bool              `json:"blocked"`
 	RetryAt   time.Time         `json:"retry_at,omitzero"`
 	Windows   []QuotaWindowView `json:"windows"`
@@ -62,6 +65,7 @@ type QuotaView struct {
 func (w QuotaWindow) view(cycle QuotaCycle) QuotaWindowView {
 	view := QuotaWindowView{
 		ID: w.ID, Name: w.Name, PeriodSeconds: w.PeriodSeconds,
+		CycleMode: w.cycleMode(), AnchorAt: w.AnchorAt,
 		Started: !cycle.StartAt.IsZero(), StartAt: cycle.StartAt, EndAt: cycle.EndAt,
 		Dimensions: make([]QuotaBalance, 0, 3),
 	}
@@ -74,7 +78,7 @@ func (w QuotaWindow) view(cycle QuotaCycle) QuotaWindowView {
 	return view
 }
 
-func quotaView(key *KeyState, plan Plan) QuotaView {
+func quotaView(key *KeyState, plan Plan, now time.Time) QuotaView {
 	view := QuotaView{Windows: make([]QuotaWindowView, 0, len(plan.Windows)), Unlimited: plan.ID == ""}
 	for _, window := range plan.Windows {
 		item := window.view(key.Cycles[window.ID])
@@ -86,7 +90,26 @@ func quotaView(key *KeyState, plan Plan) QuotaView {
 		}
 		view.Windows = append(view.Windows, item)
 	}
+	if pendingAt := plan.pendingAt(now); !pendingAt.IsZero() {
+		view.Pending = true
+		if pendingAt.After(view.RetryAt) {
+			view.RetryAt = pendingAt
+		}
+	}
 	return view
+}
+
+func (p Plan) pendingAt(now time.Time) time.Time {
+	var pendingAt time.Time
+	for _, window := range p.Windows {
+		if window.cycleMode() != QuotaCycleAnchored || !now.Before(window.AnchorAt) {
+			continue
+		}
+		if window.AnchorAt.After(pendingAt) {
+			pendingAt = window.AnchorAt
+		}
+	}
+	return pendingAt
 }
 
 func appendQuotaBalance[T int64 | float64](balances []QuotaBalance, metric QuotaMetric, limit, used T) []QuotaBalance {
@@ -129,8 +152,13 @@ func activateCycles(key *KeyState, plan Plan, now time.Time) bool {
 	changed := false
 	for _, window := range plan.Windows {
 		if _, exists := key.Cycles[window.ID]; !exists {
+			startAt := now
+			if window.cycleMode() == QuotaCycleAnchored {
+				period := time.Duration(window.PeriodSeconds) * time.Second
+				startAt = window.AnchorAt.Add(now.Sub(window.AnchorAt) / period * period)
+			}
 			key.Cycles[window.ID] = QuotaCycle{
-				PlanID: plan.ID, StartAt: now, EndAt: now.Add(time.Duration(window.PeriodSeconds) * time.Second),
+				PlanID: plan.ID, StartAt: startAt, EndAt: startAt.Add(time.Duration(window.PeriodSeconds) * time.Second),
 			}
 			changed = true
 		}
@@ -149,6 +177,13 @@ func (key *KeyState) ValidateCycles(plan Plan) error {
 			cycle.SpentUSD < 0 || math.IsNaN(cycle.SpentUSD) || math.IsInf(cycle.SpentUSD, 0) ||
 			cycle.UsedRequests < 0 || cycle.UsedTokens < 0 {
 			return invalidf("API Key 的额度周期数据无效")
+		}
+		window := plan.Windows[index]
+		if window.cycleMode() == QuotaCycleAnchored {
+			period := time.Duration(window.PeriodSeconds) * time.Second
+			if cycle.StartAt.Before(window.AnchorAt) || cycle.StartAt.Sub(window.AnchorAt)%period != 0 {
+				return invalidf("API Key 的锚定周期数据无效")
+			}
 		}
 	}
 	return nil

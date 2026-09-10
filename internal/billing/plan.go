@@ -16,14 +16,23 @@ type Plan struct {
 	Windows []QuotaWindow `json:"windows"`
 }
 
+type QuotaCycleMode string
+
+const (
+	QuotaCycleRolling  QuotaCycleMode = "rolling"
+	QuotaCycleAnchored QuotaCycleMode = "anchored"
+)
+
 // Zero disables a dimension within the window's independently timed cycle.
 type QuotaWindow struct {
-	ID            string  `json:"id"`
-	Name          string  `json:"name"`
-	PeriodSeconds int64   `json:"period_seconds"`
-	AmountUSD     float64 `json:"amount_usd"`
-	TokenLimit    int64   `json:"token_limit"`
-	RequestLimit  int64   `json:"request_limit"`
+	ID            string         `json:"id"`
+	Name          string         `json:"name"`
+	PeriodSeconds int64          `json:"period_seconds"`
+	AmountUSD     float64        `json:"amount_usd"`
+	TokenLimit    int64          `json:"token_limit"`
+	RequestLimit  int64          `json:"request_limit"`
+	CycleMode     QuotaCycleMode `json:"cycle_mode,omitempty"`
+	AnchorAt      time.Time      `json:"anchor_at,omitzero"`
 }
 
 const maxPeriodSeconds = int64(math.MaxInt64) / int64(time.Second)
@@ -64,12 +73,37 @@ func (p Plan) Validate() error {
 		if window.PeriodSeconds <= 0 || window.PeriodSeconds > maxPeriodSeconds {
 			return invalidf("窗口 %q：周期必须为 1 到 %d 秒", name, maxPeriodSeconds)
 		}
+		switch window.cycleMode() {
+		case QuotaCycleRolling:
+			if !window.AnchorAt.IsZero() {
+				return invalidf("窗口 %q：滚动周期不能设置锚定起点", name)
+			}
+		case QuotaCycleAnchored:
+			if window.AnchorAt.IsZero() {
+				return invalidf("窗口 %q：锚定周期必须设置锚定起点", name)
+			}
+		default:
+			return invalidf("窗口 %q：周期方式无效", name)
+		}
 		if periods[window.PeriodSeconds] {
 			return invalidf("窗口 %q 的周期与其他窗口重复", name)
 		}
 		ids[window.ID], names[strings.ToLower(name)], periods[window.PeriodSeconds] = true, true, true
 	}
 	return nil
+}
+
+func (w QuotaWindow) cycleMode() QuotaCycleMode {
+	mode := QuotaCycleMode(strings.TrimSpace(string(w.CycleMode)))
+	if mode == "" {
+		return QuotaCycleRolling
+	}
+	return mode
+}
+
+func (w QuotaWindow) hasSameSchedule(other QuotaWindow) bool {
+	return w.ID == other.ID && w.PeriodSeconds == other.PeriodSeconds && w.cycleMode() == other.cycleMode() &&
+		w.AnchorAt.Equal(other.AnchorAt)
 }
 
 func prepareWindows(windows, existing []QuotaWindow) ([]QuotaWindow, error) {
@@ -217,7 +251,7 @@ func (s *Store) UpdatePlanWithBindings(patch PlanPatch, scopes *[]string) (Plan,
 			if patch.Windows != nil {
 				for _, old := range state.Plans[i].Windows {
 					if !slices.ContainsFunc(updated.Windows, func(window QuotaWindow) bool {
-						return window.ID == old.ID && window.PeriodSeconds == old.PeriodSeconds
+						return old.hasSameSchedule(window)
 					}) {
 						resetWindows = append(resetWindows, old.ID)
 					}

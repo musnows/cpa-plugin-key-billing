@@ -279,7 +279,11 @@ func modelForbiddenResponse(sourceFormat string, decision billing.RoutingDecisio
 
 func quotaExhaustedMessage(decision billing.Decision) string {
 	var builder strings.Builder
-	builder.WriteString("API key subscription quota exhausted:")
+	if decision.Pending {
+		builder.WriteString("API key subscription has not started yet:")
+	} else {
+		builder.WriteString("API key subscription quota exhausted:")
+	}
 	for _, window := range decision.Windows {
 		for _, balance := range window.Dimensions {
 			if !balance.Blocked {
@@ -299,7 +303,11 @@ func quotaExhaustedMessage(decision billing.Decision) string {
 	}
 	builder.WriteString(".")
 	if !decision.RetryAt.IsZero() {
-		builder.WriteString(" Quota resets at ")
+		if decision.Pending {
+			builder.WriteString(" Subscription starts at ")
+		} else {
+			builder.WriteString(" Quota resets at ")
+		}
 		builder.WriteString(decision.RetryAt.UTC().Format(time.RFC3339))
 		builder.WriteString(".")
 	}

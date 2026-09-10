@@ -3181,6 +3181,9 @@
         [60, "分钟"],
         [1, "秒"],
       ];
+      const ROLLING_CYCLE_MODE = "rolling";
+      const ANCHORED_CYCLE_MODE = "anchored";
+      const ANCHOR_TIMEZONE_OFFSET = "+08:00";
       const LIST_PAGE_SIZE = 50;
       const EVENT_EXPORT_BATCH_SIZE = 1000;
       const EVENT_LOAD_MORE_THRESHOLD_PX = 320;
@@ -5144,7 +5147,9 @@
           ? ""
           : subscription.unlimited
             ? "不限制"
-            : subscription.blocked
+            : subscription.pending
+              ? "未开始"
+              : subscription.blocked
               ? "额度用尽"
               : "正常";
         const target = $("account-windows");
@@ -7199,7 +7204,7 @@
             const name = plan.name || plan.id;
             const windows = plan.windows.map((window) =>
               settingsEntryField(
-                window.name + " · " + periodLabel(window.period_seconds),
+                window.name + " · " + quotaWindowScheduleLabel(window),
                 settingsChipList(
                   QUOTA_DIMENSIONS.filter((metric) => window[metric.key] > 0).map((metric) => ({
                     text: metric.format(window[metric.key]) + (metric.planUnit ? " " + metric.planUnit : ""),
@@ -8687,8 +8692,53 @@
         return int(seconds / unit) + " " + label;
       }
 
+      function quotaCycleMode(value) {
+        return value === ANCHORED_CYCLE_MODE ? ANCHORED_CYCLE_MODE : ROLLING_CYCLE_MODE;
+      }
+
+      function anchoredDateTimeValue(value) {
+        const date = new Date(value);
+        if (isNaN(date.getTime())) return "";
+        const values = Object.fromEntries(
+          new Intl.DateTimeFormat("en-CA", {
+            timeZone: "Asia/Shanghai",
+            year: "numeric",
+            month: "2-digit",
+            day: "2-digit",
+            hour: "2-digit",
+            minute: "2-digit",
+            hourCycle: "h23",
+          })
+            .formatToParts(date)
+            .filter((part) => part.type !== "literal")
+            .map((part) => [part.type, part.value]),
+        );
+        return values.year + "-" + values.month + "-" + values.day + "T" + values.hour + ":" + values.minute;
+      }
+
+      function anchoredDateTimeISO(value) {
+        if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(value)) return "";
+        const date = new Date(value + ":00" + ANCHOR_TIMEZONE_OFFSET);
+        return isNaN(date.getTime()) ? "" : date.toISOString();
+      }
+
+      function anchoredDateTimeLabel(value) {
+        const formatted = anchoredDateTimeValue(value);
+        return formatted ? formatted.replaceAll("-", "/").replace("T", " ") + "（东八区）" : "";
+      }
+
+      function quotaWindowScheduleLabel(window) {
+        if (quotaCycleMode(window.cycle_mode) !== ANCHORED_CYCLE_MODE || !window.anchor_at)
+          return periodLabel(window.period_seconds);
+        return periodLabel(window.period_seconds) + " · 锚定 " + anchoredDateTimeLabel(window.anchor_at);
+      }
+
       function quotaWindowResetLabel(row, showCountdown) {
-        if (!row.started) return "未开始";
+        if (!row.started) {
+          if (quotaCycleMode(row.cycle_mode) === ANCHORED_CYCLE_MODE && row.anchor_at)
+            return "始于 " + anchoredDateTimeLabel(row.anchor_at);
+          return "未开始";
+        }
         const resetAt = new Date(row.end_at);
         const remaining = (resetAt.getTime() - Date.now()) / 1000;
         return (
@@ -8708,7 +8758,11 @@
             const reset = el("span", {
               class: "muted",
               text: quotaWindowResetLabel(window, account),
-              title: window.started ? when(window.end_at) + " 重置" : null,
+              title: window.started
+                ? when(window.end_at) + " 重置"
+                : window.anchor_at
+                  ? "锚定起点 " + anchoredDateTimeLabel(window.anchor_at)
+                  : null,
             });
             return el(
               "div",
@@ -8768,6 +8822,29 @@
         const row = el("div", { class: "plan-window", "data-id": quotaWindow.id || "" });
         const field = (label, input) =>
           el("label", { class: "field" }, label, input, el("span", { class: "field-error small" }));
+        const cycleMode = quotaCycleMode(quotaWindow.cycle_mode);
+        const cycleModeInput = el(
+          "select",
+          { name: "cycle_mode", "aria-label": "周期方式" },
+          el("option", { value: ROLLING_CYCLE_MODE, selected: cycleMode === ROLLING_CYCLE_MODE, text: "滚动周期" }),
+          el("option", { value: ANCHORED_CYCLE_MODE, selected: cycleMode === ANCHORED_CYCLE_MODE, text: "锚定日期" }),
+        );
+        const anchorInput = el("input", {
+          name: "anchor_at",
+          type: "datetime-local",
+          step: "60",
+          value: anchoredDateTimeValue(quotaWindow.anchor_at),
+          "aria-label": "锚定起点（东八区）",
+        });
+        const anchorField = field("锚定起点（东八区）", anchorInput);
+        const syncCycleMode = () => {
+          const anchored = cycleModeInput.value === ANCHORED_CYCLE_MODE;
+          anchorField.hidden = !anchored;
+          anchorInput.disabled = !anchored;
+          anchorInput.required = anchored;
+        };
+        cycleModeInput.onchange = syncCycleMode;
+        syncCycleMode();
         row.append(
           field("窗口名称", el("input", { name: "window_name", value: quotaWindow.name || "", required: true })),
           field(
@@ -8795,6 +8872,8 @@
               ),
             ),
           ),
+          field("周期方式", cycleModeInput),
+          anchorField,
           el(
             "button",
             {
@@ -8903,9 +8982,12 @@
           const nameInput = row.querySelector('[name="window_name"]');
           const limits = {};
           const periodInput = row.querySelector('[name="window_period"]');
+          const cycleModeInput = row.querySelector('[name="cycle_mode"]');
+          const anchorInput = row.querySelector('[name="anchor_at"]');
           const name = nameInput.value.trim();
+          const cycleMode = quotaCycleMode(cycleModeInput.value);
 
-          const seconds = periodInput.valueAsNumber * Number(row.querySelector("select").value);
+          const seconds = periodInput.valueAsNumber * Number(row.querySelector('[name="window_unit"]').value);
           if (!name || new TextEncoder().encode(name).length > 128)
             invalid(nameInput, "名称不能为空且不能超过 128 字节");
           else if (names.has(name.toLowerCase())) invalid(nameInput, "窗口名称重复");
@@ -8923,11 +9005,15 @@
             invalid(periodInput, "周期须为 1 到 9223372036 秒的整数");
           else if (periods.has(seconds)) invalid(periodInput, "周期与其他窗口重复");
           periods.add(seconds);
+          const anchorAt = cycleMode === ANCHORED_CYCLE_MODE ? anchoredDateTimeISO(anchorInput.value) : "";
+          if (cycleMode === ANCHORED_CYCLE_MODE && !anchorAt) invalid(anchorInput, "请选择有效的东八区锚定起点");
           return {
             ...(row.dataset.id ? { id: row.dataset.id } : {}),
             name,
             ...limits,
             period_seconds: seconds,
+            cycle_mode: cycleMode,
+            ...(anchorAt ? { anchor_at: anchorAt } : {}),
           };
         });
         if (firstInvalid) {

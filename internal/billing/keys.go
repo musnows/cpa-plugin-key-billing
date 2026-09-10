@@ -38,14 +38,14 @@ func (s *Store) KeyViews() []KeyView {
 			if key.DeletedAt.IsZero() && settleKeyPlan(key, plans[key.PlanID], now) {
 				settled = append(settled, scope)
 			}
-			views = append(views, keyView(scope, key, plans[key.PlanID], s.activeByScope[scope]))
+			views = append(views, keyView(scope, key, plans[key.PlanID], s.activeByScope[scope], now))
 		}
 		sortKeyViews(views)
 		return views, Changes{Keys: settled}
 	})
 }
 
-func keyView(scope string, key *KeyState, plan Plan, currentConcurrency int) KeyView {
+func keyView(scope string, key *KeyState, plan Plan, currentConcurrency int, now time.Time) KeyView {
 	return KeyView{
 		Scope:              scope,
 		Preview:            key.Preview,
@@ -54,7 +54,7 @@ func keyView(scope string, key *KeyState, plan Plan, currentConcurrency int) Key
 		DeletedAt:          key.DeletedAt,
 		PlanID:             key.PlanID,
 		PlanName:           plan.Name,
-		QuotaView:          quotaView(key, plan),
+		QuotaView:          quotaView(key, plan, now),
 		ConcurrencyLimit:   key.ConcurrencyLimit,
 		CurrentConcurrency: currentConcurrency,
 		RouteBindings: RouteBindings{
@@ -93,11 +93,12 @@ func (s *Store) KeyViewForScope(scope string) (KeyView, bool) {
 			return result{}, Changes{}
 		}
 		plan, _ := state.FindPlan(key.PlanID)
+		now := s.Now()
 		changed := Changes{}
-		if settleKeyPlan(key, plan, s.Now()) {
+		if settleKeyPlan(key, plan, now) {
 			changed.Keys = []string{scope}
 		}
-		return result{view: keyView(scope, key, plan, s.activeByScope[scope]), ok: true}, changed
+		return result{view: keyView(scope, key, plan, s.activeByScope[scope], now), ok: true}, changed
 	})
 	return current.view, current.ok
 }
